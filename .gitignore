@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+cache/
+index/
+logs/
+sources/
+*.key
+

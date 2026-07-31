@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secure-document-library"
+version = "0.1.0"
+description = "Offline encrypted parsed-document cache and lightweight search index"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42", "PyYAML>=6", "python-docx>=1.1", "openpyxl>=3.1"]
+
+[project.scripts]
+secure-library = "secure_document_library.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
