@@ -1,6 +1,6 @@
 # Secure Document Library
 
-Secure Document Library is a small, offline Python package for building a searchable library from approved files without placing the full document text in the search index. It is designed to be the secure evidence and retrieval layer beneath an AI analysis, chat, or question-answering application.
+Secure Document Library is a small, offline Python package for building a searchable library from approved files without placing the full document text in the search index. It uses encrypted, heading-aware chunks as its default evidence and retrieval layer beneath an AI analysis, chat, or question-answering application.
 
 It is useful when documents must stay in a controlled source folder, search should remain local, and the text needed for later evidence retrieval must be encrypted at rest. An AI application can search this library, retrieve only the selected authorized documents, and give those documents to a model as grounded evidence for a source-cited answer. The project contains only generic implementation code and synthetic tests; it contains no document corpus, credentials, company configuration, or generated data.
 
@@ -11,7 +11,7 @@ This package does **not** choose, call, or host an AI model. Instead, it supplie
 1. The user asks an AI application a question.
 2. The application searches this library's lightweight index without exposing or decrypting all document text.
 3. The application applies its authenticated user's authorization grants.
-4. It retrieves only the top matching, permitted `document_id` values.
+4. It retrieves only the top matching, permitted `chunk_id` values.
 5. The application passes that bounded evidence to its selected AI provider or local model.
 6. The model answers using that evidence and cites the document titles/relative paths supplied by the application.
 
@@ -23,10 +23,11 @@ Given an approved source folder, the library:
 
 1. Reads supported files without modifying them.
 2. Extracts their text into one or more document parts.
-3. Encrypts each extracted text value with AES-256-GCM in an external, content-addressed cache.
-4. Writes a compact JSONL index containing safe metadata, content hashes, and HMAC-SHA256 token frequencies—not plaintext document bodies.
-5. Searches the index using metadata and hashed body terms without decrypting documents.
-6. Retrieves selected content only by indexed `document_id`, after an authorization grant is supplied.
+3. Splits each extracted document part into deterministic, heading-aware chunks with a small local overlap.
+4. Encrypts each chunk with AES-256-GCM in an external, content-addressed cache.
+5. Writes a compact `chunks.jsonl` index containing safe metadata, content hashes, and HMAC-SHA256 token frequencies—not plaintext document bodies.
+6. Searches the index using metadata and hashed chunk terms without decrypting content.
+7. Retrieves selected evidence only by indexed `chunk_id`, after an authorization grant is supplied.
 
 ```text
 Approved source files
@@ -38,10 +39,10 @@ Offline parsers --> encrypted cache (AES-256-GCM)
 lightweight JSONL index -------+
         |
         v
-authorized search --> document ID --> selected decryption
+authorized search --> chunk ID --> selected decryption
 ```
 
-In a production AI workflow, the final “selected decryption” step is where the caller assembles a short, authorized evidence bundle for the model. It should enforce document and total-character limits, avoid writing plaintext evidence to temporary files, and instruct the model to disclose evidence gaps instead of inventing an answer.
+In a production AI workflow, the final “selected decryption” step is where the caller assembles a short, authorized evidence bundle for the model. This default chunking approach avoids sending an entire long document when only one section is relevant. The caller should still enforce chunk-count and total-character limits, avoid writing plaintext evidence to temporary files, and instruct the model to disclose evidence gaps instead of inventing an answer.
 
 ## Supported formats
 
@@ -62,7 +63,7 @@ The source folder is never modified, renamed, copied, or deleted by the package.
 | --- | --- | --- |
 | Source root | Original approved files | Usually yes |
 | Cache root | AES-GCM encrypted parsed text | Yes |
-| Index output | Titles, relative paths, types, document IDs, content hashes, HMAC token frequencies, opaque cache references | Yes for sensitive deployments |
+| Index output | Titles, section titles, relative paths, types, document and chunk IDs, content hashes, HMAC token frequencies, opaque cache references | Yes for sensitive deployments |
 | Repository | Source code, tests, documentation, package metadata | Suitable for public review after your own review |
 
 The index does not contain the full parsed text. An HMAC token frequency cannot be searched without the separate search key, but metadata such as titles and relative paths may still be sensitive and should be protected accordingly.
@@ -74,7 +75,7 @@ The index does not contain the full parsed text. An HMAC token frequency cannot 
 - Cache objects are deduplicated by normalized-content SHA-256 hash.
 - Encryption and HMAC-search keys are separate environment variables and must decode to different 32-byte values.
 - Search returns no results until a caller supplies authorized source IDs.
-- Retrieval accepts an indexed document ID, not an arbitrary filesystem path.
+- Retrieval accepts an indexed chunk ID, not an arbitrary filesystem path.
 - Search does not decrypt cache objects; only `retrieve` decrypts a selected record.
 - The package makes no network calls for parsing, building, searching, or retrieval.
 
@@ -130,10 +131,10 @@ Search the existing index. `--authorized-source default` is the generic example 
 secure-library search "example terms" --index .\index --authorized-source default
 ```
 
-Retrieve one selected document after search. Use the `document_id` returned by the search result:
+Retrieve one selected evidence chunk after search. Use the `chunk_id` returned by the search result:
 
 ```powershell
-secure-library retrieve <document-id> --index .\index --authorized-source default
+secure-library retrieve <chunk-id> --index .\index --authorized-source default
 ```
 
 Do not expose this retrieval command directly to untrusted users without adding real authentication, authorization, audit logging, rate limiting, and output controls.
@@ -146,10 +147,10 @@ from secure_document_library.library import build, search, retrieve
 
 build(Path(r"D:\approved-documents"), Path("index"))
 results = search(Path("index"), "example terms", {"default"})
-text = retrieve(Path("index"), results[0]["document_id"], {"default"})
+text = retrieve(Path("index"), results[0]["chunk_id"], {"default"})
 ```
 
-`search()` returns metadata and a score only. `retrieve()` returns decrypted text only when the requested ID belongs to an authorized source.
+`search()` returns chunk metadata and a score only. `retrieve()` returns one decrypted chunk only when the requested ID belongs to an authorized source.
 
 ## Testing
 
@@ -158,7 +159,7 @@ $env:PYTHONPATH = "$PWD\src"
 python -m unittest discover -s tests -v
 ```
 
-The included test verifies encrypted build/search/retrieval behavior, denied search without authorization, and that sample plaintext is absent from the encrypted cache file.
+The included tests verify encrypted chunk build/search/retrieval behavior, denied search without authorization, heading-aware evidence selection, and that sample plaintext is absent from the encrypted cache file and index.
 
 ## Production checklist
 
