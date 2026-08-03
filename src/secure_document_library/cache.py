@@ -19,6 +19,9 @@ class EncryptedCache:
     def __init__(self, root: Path, key_id: str = "cache-v1"):
         self.root, self.key_id = root.resolve(), key_id
         self.key = _key("SECURE_LIBRARY_CACHE_KEY")
+        self.search_key = _key("SECURE_LIBRARY_SEARCH_KEY")
+        if secrets.compare_digest(self.key, self.search_key):
+            raise ValueError("SECURE_LIBRARY_CACHE_KEY and SECURE_LIBRARY_SEARCH_KEY must be different")
 
     def _file(self, object_id: str) -> Path: return self.root / "objects" / object_id[:2] / f"{object_id}.bin"
 
@@ -43,4 +46,3 @@ class EncryptedCache:
         except Exception as exc: raise ValueError("Cache authentication failed") from exc
         if hashlib.sha256(text.encode()).hexdigest() != object_id: raise ValueError("Cache hash mismatch")
         return text
-
