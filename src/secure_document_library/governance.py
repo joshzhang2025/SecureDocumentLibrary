@@ -5,14 +5,14 @@ evidence ledger and validates a provider's structured draft before rendering.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from collections.abc import Iterator
 
 from .cache import EncryptedCache
-from .library import _search_records
+from .index_io import iter_jsonl
+from .library import INDEX_FILE, _search_records, calculate_index_digest
 
 
 class Intent(StrEnum):
@@ -40,21 +40,56 @@ class AuthorizationContext:
 class IndexSnapshot:
     build_id: str
     index_path: Path
-    records: tuple[dict, ...]
+    size: int
+    modified_ns: int
+
+    def assert_unchanged(self) -> None:
+        try:
+            current = self.index_path.stat()
+        except OSError as exc:
+            raise ValueError("INDEX_CHANGED") from exc
+        if current.st_size != self.size or current.st_mtime_ns != self.modified_ns:
+            raise ValueError("INDEX_CHANGED")
 
 
 def snapshot_index(index_root: Path) -> IndexSnapshot:
-    path = index_root.resolve() / "chunks.jsonl"
+    path = index_root.resolve() / INDEX_FILE
     if not path.is_file():
         raise FileNotFoundError("INDEX_UNAVAILABLE")
-    raw = path.read_bytes()
+    initial = path.stat()
+    found = False
     try:
-        records = tuple(json.loads(line) for line in raw.decode("utf-8").splitlines() if line)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        for _, _ in iter_jsonl(path):
+            found = True
+    except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("INDEX_INVALID") from exc
-    if not records:
+    if not found:
         raise ValueError("INDEX_EMPTY")
-    return IndexSnapshot(hashlib.sha256(raw).hexdigest()[:24], index_root.resolve(), records)
+    snapshot = IndexSnapshot(calculate_index_digest(index_root)[:24], path, initial.st_size, initial.st_mtime_ns)
+    snapshot.assert_unchanged()
+    return snapshot
+
+
+def _iter_snapshot_records(snapshot: IndexSnapshot) -> Iterator[dict]:
+    """Yield a stable index view and reject an index replaced mid-request."""
+    snapshot.assert_unchanged()
+    try:
+        for _, record in iter_jsonl(snapshot.index_path):
+            yield record
+    except ValueError as exc:
+        raise ValueError("INDEX_INVALID") from exc
+    finally:
+        snapshot.assert_unchanged()
+
+
+def _selected_records(snapshot: IndexSnapshot, chunk_ids: set[str]) -> dict[str, dict]:
+    """Load only evidence candidates, rather than all records in the index."""
+    selected: dict[str, dict] = {}
+    for record in _iter_snapshot_records(snapshot):
+        chunk_id = record.get("chunk_id")
+        if isinstance(chunk_id, str) and chunk_id in chunk_ids:
+            selected[chunk_id] = record
+    return selected
 
 
 def classify_intent(question: str, override: Intent | None = None) -> Intent:
@@ -80,8 +115,7 @@ def _plan(question: str, intent: Intent) -> tuple[tuple[str, str, int], ...]:
     )
 
 
-def _safe_ledger(snapshot: IndexSnapshot, results: list[dict], context: AuthorizationContext, status: MatchStatus, maximum: int) -> list[dict]:
-    records = {item["chunk_id"]: item for item in snapshot.records}
+def _safe_ledger(snapshot: IndexSnapshot, records: dict[str, dict], results: list[dict], context: AuthorizationContext, status: MatchStatus, maximum: int) -> list[dict]:
     selected: dict[str, dict] = {}
     for result in results:
         current = selected.get(result["chunk_id"])
@@ -94,7 +128,9 @@ def _safe_ledger(snapshot: IndexSnapshot, results: list[dict], context: Authoriz
     for hit in ordered:
         if len(entries) >= maximum:
             break
-        record = records[hit["chunk_id"]]
+        record = records.get(hit["chunk_id"])
+        if record is None:
+            raise ValueError("INDEX_CHANGED")
         if record["source_id"] not in context.authorized_source_ids:
             continue
         if context.allowed_classifications and record.get("classification", "internal") not in context.allowed_classifications:
@@ -122,19 +158,24 @@ def _prepare_from_snapshot(snapshot: IndexSnapshot, question: str, context: Auth
     if not context.authorized_source_ids:
         raise PermissionError("AUTHORIZATION_CONTEXT_MISSING")
     classified = classify_intent(question, intent)
-    eligible_records = tuple(
-        record for record in snapshot.records
-        if not context.allowed_classifications or record.get("classification", "internal") in context.allowed_classifications
-    )
     runs, all_results = [], []
     for purpose, query, limit in _plan(question, classified):
-        hits = _search_records(eligible_records, query, set(context.authorized_source_ids))[:limit]
+        hits = _search_records(
+            (
+                record for record in _iter_snapshot_records(snapshot)
+                if not context.allowed_classifications or record.get("classification", "internal") in context.allowed_classifications
+            ),
+            query,
+            set(context.authorized_source_ids),
+            limit=limit,
+        )
         for hit in hits:
             hit["matched_subqueries"] = [purpose]
         all_results.extend(hits)
         runs.append({"purpose": purpose, "query": query, "build_id": snapshot.build_id, "status": "MATCHED" if hits else "ZERO_RELEVANT_MATCHES", "result_count": len(hits), "error": None})
     status = MatchStatus.MATCHED if any(item["confidence"] in {"high", "medium"} for item in all_results) else MatchStatus.WEAK_MATCHES if all_results else MatchStatus.ZERO_RELEVANT_MATCHES
-    ledger = _safe_ledger(snapshot, all_results, context, status, 10 if classified is not Intent.FACT_LOOKUP else 4)
+    records = _selected_records(snapshot, {item["chunk_id"] for item in all_results})
+    ledger = _safe_ledger(snapshot, records, all_results, context, status, 10 if classified is not Intent.FACT_LOOKUP else 4)
     preview = {"success": True, "status": "preview", "question": question, "intent": classified, "build_id": snapshot.build_id, "match_status": status, "search_plan": {"intent": classified, "runs": runs}, "evidence_ledger": {"match_status": status, "entries": [_public_entry(item) for item in ledger]}, "model_request_schema": structured_answer_schema()}
     return preview, ledger
 

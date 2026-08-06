@@ -46,3 +46,14 @@ class EncryptedCache:
         except Exception as exc: raise ValueError("Cache authentication failed") from exc
         if hashlib.sha256(text.encode()).hexdigest() != object_id: raise ValueError("Cache hash mismatch")
         return text
+
+    def verify(self, object_ids: list[str] | tuple[str, ...]) -> dict[str, int | bool]:
+        """Authenticate a bounded group of cache objects without returning text."""
+        checked = 0
+        for object_id in object_ids:
+            try:
+                self.get(object_id)
+            except (OSError, ValueError, KeyError):
+                return {"ok": False, "checked": checked}
+            checked += 1
+        return {"ok": True, "checked": checked}
