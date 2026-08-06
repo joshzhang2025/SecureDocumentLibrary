@@ -1,6 +1,6 @@
 # Secure Document Library
 
-Secure Document Library is a small, offline Python package for building a searchable library from approved files without placing the full document text in the search index. It uses encrypted, heading-aware chunks as its default evidence and retrieval layer beneath an AI analysis, chat, or question-answering application.
+Secure Document Library is a small, offline Python package for building a searchable library from approved files without placing the full document text in the search index. It uses encrypted, heading-aware chunks as its default evidence and retrieval layer beneath an AI analysis, chat, or question-answering application. Builds are first sealed in private staging, independently validated, copied into an immutable release, and only then atomically promoted to `current`.
 
 It is useful when documents must stay in a controlled source folder, search should remain local, and the text needed for later evidence retrieval must be encrypted at rest. An AI application can search this library, retrieve only the selected authorized documents, and give those documents to a model as grounded evidence for a source-cited answer. The project contains only generic implementation code and synthetic tests; it contains no document corpus, credentials, company configuration, or generated data.
 
@@ -10,7 +10,7 @@ The package now includes a generic answer-governance layer. It still does not
 choose or call an AI model, but it gives an AI host a safer, repeatable way to
 prepare and validate an answer:
 
-1. Pin the requested `chunks.jsonl` bytes to a request-specific build ID.
+1. Pin the request to one validated immutable release and its key generations.
 2. Classify the request as a fact lookup, summary, or solution-design request.
 3. Use one focused search for facts and summaries, or up to three grounded
    searches for solution design (current state, problems, related work).
@@ -45,7 +45,7 @@ Given an approved source folder, the library:
 2. Extracts their text into one or more document parts.
 3. Splits each extracted document part into deterministic, heading-aware chunks with a small local overlap.
 4. Encrypts each chunk with AES-256-GCM in an external, content-addressed cache.
-5. Writes a compact `chunks.jsonl` index containing safe metadata, content hashes, and HMAC-SHA256 token frequencies—not plaintext document bodies.
+5. Writes compact `documents.jsonl`, `chunks.jsonl`, and `files.jsonl` manifests containing safe metadata, content hashes, and HMAC-SHA256 token frequencies—not plaintext document bodies.
 6. Searches the index using metadata and hashed chunk terms without decrypting content.
 7. Retrieves selected evidence only by indexed `chunk_id`, after an authorization grant is supplied.
 
@@ -132,7 +132,9 @@ Set the required runtime settings for the current PowerShell session:
 ```powershell
 $env:SECURE_LIBRARY_CACHE_ROOT = 'D:\secure-library-cache'
 $env:SECURE_LIBRARY_CACHE_KEY = '<base64-encoded-32-byte-encryption-key>'
+$env:SECURE_LIBRARY_CACHE_KEY_ID = 'content-2026-01'
 $env:SECURE_LIBRARY_SEARCH_KEY = '<different-base64-encoded-32-byte-search-key>'
+$env:SECURE_LIBRARY_SEARCH_KEY_ID = 'search-2026-01'
 ```
 
 Never put real values for these variables in code, committed configuration files, or GitHub Actions secrets visible to untrusted workflows.
@@ -142,19 +144,21 @@ Never put real values for these variables in code, committed configuration files
 Build an index from a source folder:
 
 ```powershell
-secure-library build --source-root D:\approved-documents --output .\index
+secure-library build --source-root D:\approved-documents --index-root .\index --mode full
 ```
 
 Search the existing index. `--authorized-source default` is the generic example grant used by this standalone package; a real service must derive grants from authenticated identity and policy.
 
 ```powershell
-secure-library search "example terms" --index .\index --authorized-source default
+secure-library validate --staging .\index\staging\GENERIC-<build-id>
+secure-library publish --staging .\index\staging\GENERIC-<build-id> --index-root .\index --expected-build-id GENERIC-<build-id>
+secure-library search "example terms" --index-root .\index --authorized-source default --limit 100
 ```
 
 Retrieve one selected evidence chunk after search. Use the `chunk_id` returned by the search result:
 
 ```powershell
-secure-library retrieve <chunk-id> --index .\index --authorized-source default
+secure-library retrieve <chunk-id> --index-root .\index --authorized-source default
 ```
 
 Prepare a governed answer request. This is a safe preview: it prints the
@@ -163,7 +167,7 @@ does not print decrypted evidence or invent a natural-language answer.
 
 ```powershell
 secure-library answer "Design a safer permission workflow" `
-  --index .\index `
+  --index-root .\index `
   --authorized-source default `
   --intent solution
 ```
@@ -217,9 +221,15 @@ from the encrypted cache file and index.
 - Back up encrypted cache data and keys under equivalent access controls.
 - Review retention and key-rotation procedures before production use.
 
+## Lifecycle and key rotation
+
+`build` creates a sealed staging directory; `publish` validates a private copy before atomically replacing `index/current`; `rollback <build-id>` validates and promotes a retained release. The Python `build()` convenience function performs all three lifecycle steps for local callers.
+
+The active keys are identified by `SECURE_LIBRARY_CACHE_KEY_ID` and `SECURE_LIBRARY_SEARCH_KEY_ID`. During a rotation, set `SECURE_LIBRARY_CACHE_KEYS` and `SECURE_LIBRARY_SEARCH_KEYS` to JSON keyrings containing both old and new generations. New cache objects are generation-specific version 2 objects; retained releases continue to use their pinned key IDs until the retention window ends.
+
 ## Limitations
 
-- This minimal generic example does not implement incremental rebuilds, immutable release directories, document-level audit logs, user identity verification, automatic model calls, or a production access-control service. The answer-governance functions are designed for a trusted host to compose with those controls.
+- This generic package does not implement document-level audit logs, user identity verification, automatic model calls, or a production access-control service. The answer-governance functions are designed for a trusted host to compose with those controls.
 - It does not perform OCR, transcription, macro execution, formula calculation, or external search/embedding calls.
 - XLSX and DOCX parsing preserves useful text but is not a full fidelity document renderer.
 

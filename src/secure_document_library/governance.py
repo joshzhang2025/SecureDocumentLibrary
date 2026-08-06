@@ -12,7 +12,8 @@ from collections.abc import Iterator
 
 from .cache import EncryptedCache
 from .index_io import iter_jsonl
-from .library import INDEX_FILE, _search_records, calculate_index_digest
+from .library import _search_records
+from .snapshot import open_snapshot
 
 
 class Intent(StrEnum):
@@ -42,6 +43,8 @@ class IndexSnapshot:
     index_path: Path
     size: int
     modified_ns: int
+    provider: object
+    search_key_id: str
 
     def assert_unchanged(self) -> None:
         try:
@@ -53,9 +56,8 @@ class IndexSnapshot:
 
 
 def snapshot_index(index_root: Path) -> IndexSnapshot:
-    path = index_root.resolve() / INDEX_FILE
-    if not path.is_file():
-        raise FileNotFoundError("INDEX_UNAVAILABLE")
+    pinned = open_snapshot(index_root)
+    path = pinned.chunks_path
     initial = path.stat()
     found = False
     try:
@@ -65,7 +67,7 @@ def snapshot_index(index_root: Path) -> IndexSnapshot:
         raise ValueError("INDEX_INVALID") from exc
     if not found:
         raise ValueError("INDEX_EMPTY")
-    snapshot = IndexSnapshot(calculate_index_digest(index_root)[:24], path, initial.st_size, initial.st_mtime_ns)
+    snapshot = IndexSnapshot(pinned.build_id, path, initial.st_size, initial.st_mtime_ns, pinned.provider, pinned.search_key_id)
     snapshot.assert_unchanged()
     return snapshot
 
@@ -122,7 +124,7 @@ def _safe_ledger(snapshot: IndexSnapshot, records: dict[str, dict], results: lis
         if current is None or result["score"] > current["score"]:
             selected[result["chunk_id"]] = result
     ordered = sorted(selected.values(), key=lambda item: (-item["score"], item["chunk_id"]))
-    cache = EncryptedCache(Path(__import__("os").environ["SECURE_LIBRARY_CACHE_ROOT"]))
+    cache = EncryptedCache(Path(__import__("os").environ["SECURE_LIBRARY_CACHE_ROOT"]), snapshot.provider)
     entries: list[dict] = []
     per_document: dict[str, int] = {}
     for hit in ordered:
@@ -159,6 +161,8 @@ def _prepare_from_snapshot(snapshot: IndexSnapshot, question: str, context: Auth
         raise PermissionError("AUTHORIZATION_CONTEXT_MISSING")
     classified = classify_intent(question, intent)
     runs, all_results = [], []
+    search_cache = EncryptedCache(Path(__import__("os").environ["SECURE_LIBRARY_CACHE_ROOT"]), snapshot.provider)
+    search_cache.search_key = snapshot.provider.search_key(snapshot.search_key_id)
     for purpose, query, limit in _plan(question, classified):
         hits = _search_records(
             (
@@ -167,6 +171,7 @@ def _prepare_from_snapshot(snapshot: IndexSnapshot, question: str, context: Auth
             ),
             query,
             set(context.authorized_source_ids),
+            cache=search_cache,
             limit=limit,
         )
         for hit in hits:
